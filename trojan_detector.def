@@ -1,0 +1,15 @@
+Bootstrap: docker
+From: pytorch/pytorch:latest
+
+%files
+    ./trojan_detector.py /
+    ./model_factories.py /
+    ./clfs.pickle /
+    ./dims.pickle /
+
+%post
+    /opt/conda/bin/conda install scikit-learn
+    pip install trojai transformers
+
+%runscript
+    exec python3 /trojan_detector.py "$@"
