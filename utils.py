@@ -7,6 +7,7 @@ import torch
 import transformers
 import pandas
 import math
+import pickle
 
 import warnings
 import json
@@ -72,7 +73,7 @@ def get_sentiment_on_examples(examples_dirpath, tokenizer, embedding, model, max
         # load the example
         with open(fn, 'r') as fh:
             try:
-                text = fh.readline()
+                text = fh.read()
             except:
                 continue
         
@@ -116,7 +117,7 @@ def get_sentiment_on_embeddings(embeddings, labels, model, use_amp, device):
 
     return logits, is_correct
 
-def embedding_distance(model_filepath, cls_token_is_first, tokenizer_filepath, embedding_filepath, examples_dirpath, poison_examples_dirpath, trigger_texts):
+def embedding_distance(model_filepath, cls_token_is_first, tokenizer_filepath, embedding_filepath, examples_dirpath, poison_examples_dirpath, trigger_texts, input_type='clean'):
     # load the classification model and move it to the GPU
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -140,15 +141,14 @@ def embedding_distance(model_filepath, cls_token_is_first, tokenizer_filepath, e
 
     use_amp = True  # attempt to use mixed precision to accelerate embedding conversion process
 
-    clean_logits, clean_embeddings, clean_labels = get_sentiment_on_examples(examples_dirpath, tokenizer, embedding, model, max_input_length, cls_token_is_first, use_amp, device, None)
-
-    if trigger_texts is None:
+    if input_type == 'clean' or trigger_texts is None:
+        clean_logits, clean_embeddings, clean_labels = get_sentiment_on_examples(examples_dirpath, tokenizer, embedding, model, max_input_length, cls_token_is_first, use_amp, device, None)
         return clean_logits, clean_embeddings, clean_labels
 
-    triggered_logits, triggered_embeddings, triggered_labels = get_sentiment_on_examples(poison_examples_dirpath, tokenizer, embedding, model, max_input_length, cls_token_is_first, use_amp, device, None)
-    trig_removed_logits, trig_removed_embeddings, trig_removed_labels = get_sentiment_on_examples(poison_examples_dirpath, tokenizer, embedding, model, max_input_length, cls_token_is_first, use_amp, device, trigger_texts)
-
-    return clean_logits, clean_embeddings, clean_labels, triggered_logits, triggered_embeddings, triggered_labels, trig_removed_logits, trig_removed_embeddings, trig_removed_labels
+    else:
+        triggered_logits, triggered_embeddings, triggered_labels = get_sentiment_on_examples(poison_examples_dirpath, tokenizer, embedding, model, max_input_length, cls_token_is_first, use_amp, device, None)
+        trig_removed_logits, trig_removed_embeddings, trig_removed_labels = get_sentiment_on_examples(poison_examples_dirpath, tokenizer, embedding, model, max_input_length, cls_token_is_first, use_amp, device, trigger_texts)
+        return triggered_logits, triggered_embeddings, triggered_labels, trig_removed_logits, trig_removed_embeddings, trig_removed_labels
 
 
 def read_model(df, model_idx, main_path, models_path):
@@ -175,9 +175,52 @@ def read_model(df, model_idx, main_path, models_path):
             config = json.load(f)
 
         trigger_texts = [t['text'] for t in config['triggers']]
+        trigger_targets = [(t['source_class'], t['target_class']) for t in config['triggers']]
     
     else:
         trigger_texts = None
+        trigger_targets = None
     
 
-    return exist, arch, poisoned, model_filepath, cls_token_is_first, tokenizer_filepath, embedding_filepath, examples_dirpath, poison_examples_dirpath, trigger_texts
+    return exist, arch, poisoned, model_filepath, cls_token_is_first, tokenizer_filepath, embedding_filepath, examples_dirpath, poison_examples_dirpath, trigger_texts, trigger_targets
+
+
+def write_embeddings_on_file(df, main_path, models_path, round_suffix, input_type='clean'):
+
+    if input_type == 'clean':
+        all_embeddings, all_clean_logits, all_clean_labels = [], [], []
+        filename = f'clean_embeddings_{round_suffix}.pickle'
+
+    else:
+        all_trig_embeddings, all_trig_logits, all_trig_labels, all_trig_r_embeddings, all_trig_r_logits, all_trig_r_labels = [], [], [], [], [], []
+        filename = f'triggered_embeddings_{round_suffix}.pickle'
+
+    model_labels = []
+
+    for idx, _ in enumerate(df['model_name']):
+        params = read_model(df, idx, main_path, models_path)
+        print(f'Idx: {idx} - Poisoned: {params[2]} - Embedding: {os.path.basename(params[6])} - Arch: {params[1]}')
+        
+        model_labels.append(int(params[2]))
+
+        if input_type == 'clean':
+            clean_logits, clean_embeddings, clean_labels = embedding_distance(*params[3:-1], input_type=input_type)
+            all_embeddings.append(clean_embeddings); all_clean_logits.append(clean_logits); all_clean_labels.append(clean_labels)
+
+        else:
+            triggered_logits, triggered_embeddings, triggered_labels, trig_removed_logits, trig_removed_embeddings, trig_removed_labels = embedding_distance(*params[3:], input_type=input_type)
+            all_trig_embeddings.append(triggered_embeddings); all_trig_logits.append(triggered_logits); all_trig_labels.append(triggered_labels) 
+            all_trig_r_embeddings.append(trig_removed_embeddings); all_trig_r_logits.append(trig_removed_logits); all_trig_r_labels.append(trig_removed_labels)
+
+    data = {}
+    if input_type == 'clean':
+        data['embeddings'], data['logits'], data['instance_labels'] = all_embeddings, all_clean_logits, all_clean_labels
+
+    else:
+        data['trig_embeddings'], data['trig_logits'], data['trig_instance_labels'] = all_trig_embeddings, all_trig_logits, all_trig_labels
+        data['trig_rem_embeddings'], data['trig_rem_logits'], data['trig_rem_instance_labels'] = all_trig_r_embeddings, all_trig_r_logits, all_trig_r_labels
+
+    data['model_labels'] = model_labels
+
+    with open(filename, 'wb') as handle:
+        pickle.dump(data, handle, protocol=pickle.HIGHEST_PROTOCOL)

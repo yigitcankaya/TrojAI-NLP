@@ -1,15 +1,24 @@
 Bootstrap: docker
 From: pytorch/pytorch:latest
 
+%setup
+    rm -rf ${SINGULARITY_ROOTFS}/detector
+    mkdir -p ${SINGULARITY_ROOTFS}/detector
+
 %files
-    ./trojan_detector.py /
-    ./model_factories.py /
-    ./clfs.pickle /
-    ./dims.pickle /
+    trojan_detector.py /detector
+    model_factories.py /detector
+    gates_models.py /detector
+    utils.py /detector
+    clf.pickle /detector
+
 
 %post
     /opt/conda/bin/conda install scikit-learn
-    pip install trojai transformers
+    /opt/conda/bin/conda install -c anaconda pip 
+    /opt/conda/bin/pip install trojai transformers==4.2.1 scipy
+    chmod -R 777 /detector
+
 
 %runscript
-    exec python3 /trojan_detector.py "$@"
+    exec python3 -W ignore /detector/trojan_detector.py "$@"

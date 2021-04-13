@@ -1,4 +1,5 @@
 trojai/
-models/
+models_r5/
+models_r6/
 __pycache__/
 perturb/
