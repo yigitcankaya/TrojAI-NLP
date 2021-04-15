@@ -242,14 +242,14 @@ def cdrp_with_binary_search(gated_model, embeddings, params, use_amp, target=Non
     return gates, acc_and_conf, last_good_gamma
 
 
-def apply_cdrp_on_single_model(model, clean_embeddings, labels, cdrp_params, use_amp, device):
+def apply_cdrp_on_single_model(model, embeddings, labels, cdrp_params, use_amp, device):
 
     gate_granularity = cdrp_params['gate_granularity']
 
     gated_model = GatedModel(model)
     gated_model = gated_model.to(device)
 
-    embeddings_ = np.expand_dims(clean_embeddings, axis=1) # sequence length 1
+    embeddings_ = np.expand_dims(embeddings, axis=1) # sequence length 1
     embeddings_ = torch.from_numpy(embeddings_).to(device)
 
     c1_indices, c0_indices = np.where(labels == 1)[0], np.where(labels == 0)[0]
@@ -274,10 +274,10 @@ def apply_cdrp_on_all_models(df, main_path, models_path, cdrp_params, round_suff
 
     print(f'Collecting CDRPs for {subset} models with {cdrp_params["reg_type"]} regularization...')
 
-    with open(os.path.join(f'clean_embeddings_{round_suffix}.pickle'), 'rb') as handle:
+    with open(os.path.join(f'data_{round_suffix}', 'embeddings.pickle'), 'rb') as handle:
         data =  pickle.load(handle)
     
-    all_embeddings, all_clean_labels = data['embeddings'], data['instance_labels']
+    all_embeddings, all_labels = data['embeddings'], data['instance_labels']
     
     all_gates = []
     all_accs = []
@@ -290,9 +290,9 @@ def apply_cdrp_on_all_models(df, main_path, models_path, cdrp_params, round_suff
         print(f'Idx: {idx} - Poisoned: {params[2]} - Embedding: {os.path.basename(params[6])} - Arch: {params[1]} - Gate Type: {gate_type} - Gate Granularity: {gate_granularity}')
 
         model = torch.load(params[3], map_location=device)
-        clean_embeddings, clean_labels = all_embeddings[idx], all_clean_labels[idx]
+        embeddings, labels = all_embeddings[idx], all_labels[idx]
 
-        gates_data, accs_data, gammas_data, c_indices = apply_cdrp_on_single_model(model, clean_embeddings, clean_labels, cdrp_params, use_amp, device)
+        gates_data, accs_data, gammas_data, c_indices = apply_cdrp_on_single_model(model, embeddings, labels, cdrp_params, use_amp, device)
         all_gates.append(gates_data); all_accs.append(accs_data); all_gammas.append(gammas_data); class_indices.append(c_indices)
 
         trigger_targets.append(params[-1])

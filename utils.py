@@ -33,21 +33,28 @@ def get_sentiment(text, tokenizer, embedding, model, max_input_length, cls_token
                 embedding_vector = embedding(input_ids, attention_mask=attention_mask)[0]
         else:
             embedding_vector = embedding(input_ids, attention_mask=attention_mask)[0]
+        
 
         # ignore all but the first embedding since this is sentiment classification
         if cls_token_is_first:
             embedding_vector = embedding_vector[:, 0, :]
-        else:
-            # for GPT-2 use last token as the text summary
-            embedding_vector = embedding_vector[:, -1, :]
+            embedding_vector = embedding_vector.cpu().detach().numpy()
 
-        embedding_vector = embedding_vector.to('cpu')
-        embedding_vector = embedding_vector.numpy()
+        else:
+            embedding_vector = embedding_vector.cpu().detach().numpy()
+            attn_mask = attention_mask.detach().cpu().detach().numpy()
+            emb_list = list()
+            for i in range(attn_mask.shape[0]):
+                idx = int(np.argwhere(attn_mask[i, :] == 1)[-1])
+                emb_list.append(embedding_vector[i, idx, :])
+            embedding_vector = np.stack(emb_list, axis=0)
 
         # reshape embedding vector to create batch size of 1
-        embedding_vector_np = np.expand_dims(embedding_vector, axis=0)
+        embedding_vector = np.expand_dims(embedding_vector, axis=0)
+        # embedding_vector is [1, 1, <embedding length>]
 
-    embedding_vector = torch.from_numpy(embedding_vector_np).to(device)
+        embedding_vector = torch.from_numpy(embedding_vector).to(device)
+
             
     # predict the text sentiment
     if use_amp:
@@ -56,11 +63,11 @@ def get_sentiment(text, tokenizer, embedding, model, max_input_length, cls_token
     else:
         logits = model(embedding_vector).cpu().detach().numpy()
 
-    embedding_vector_np = embedding_vector_np.flatten()
+    embedding_vector_np = embedding_vector.cpu().detach().numpy().flatten()
 
     return embedding_vector_np, logits
 
-def get_sentiment_on_examples(examples_dirpath, tokenizer, embedding, model, max_input_length, cls_token_is_first, use_amp, device, trigger_texts):
+def get_sentiment_on_examples(examples_dirpath, tokenizer, embedding, model, max_input_length, cls_token_is_first, use_amp, device):
    # Inference the example images in data
     fns = [os.path.join(examples_dirpath, fn) for fn in os.listdir(examples_dirpath) if fn.endswith('.txt')]
     fns.sort()  # ensure file ordering
@@ -69,86 +76,58 @@ def get_sentiment_on_examples(examples_dirpath, tokenizer, embedding, model, max
     logits = []
     labels = []
 
-    for fn in fns:
-        # load the example
-        with open(fn, 'r') as fh:
-            try:
-                text = fh.read()
-            except:
-                continue
-        
-        fn_base = os.path.basename(fn)
 
-        if 'source' in fn_base:
-            true_label = int(fn_base.split('_')[2])
-        else:
-            true_label = int(fn_base.split('_')[1])
+    class_idx = -1
+    while True:
+        class_idx += 1
+        fn = 'class_{}_example_{}.txt'.format(class_idx, 1)
+        if not os.path.exists(os.path.join(examples_dirpath, fn)):
+            break
 
-        text_clean = text
+        example_idx = 0
+        while True:
+            example_idx += 1
+            fn = 'class_{}_example_{}.txt'.format(class_idx, example_idx)
+            if not os.path.exists(os.path.join(examples_dirpath, fn)):
+                break
 
-        if trigger_texts is not None:
-            for trigger_text in trigger_texts:
-                text_clean = text_clean.replace(trigger_text, '')
+            # load the example
+            
+            with open(os.path.join(examples_dirpath, fn), 'r') as fh:
+                try:
+                    text = fh.read()
+                except:
+                    continue
+            
+            cur_embedding, cur_logits = get_sentiment(text, tokenizer, embedding, model, max_input_length, cls_token_is_first, use_amp, device)
 
-        cur_embedding, cur_logits = get_sentiment(text_clean, tokenizer, embedding, model, max_input_length, cls_token_is_first, use_amp, device)
-
-        embeddings.append(cur_embedding)
-        logits.append(cur_logits)
-        labels.append(true_label)
+            embeddings.append(cur_embedding)
+            logits.append(cur_logits)
+            labels.append(class_idx)
 
     return np.vstack(logits), np.vstack(embeddings), np.asarray(labels)
 
 
-def get_sentiment_on_embeddings(embeddings, labels, model, use_amp, device):
-
-    embeddings_ = np.expand_dims(embeddings, axis=1) # sequence length 1
-    embeddings_ = torch.from_numpy(embeddings_).to(device)
-                
-    # predict the text sentiment
-    if use_amp:
-        with torch.cuda.amp.autocast():
-            logits = model(embeddings_).cpu().detach().numpy()
-    else:
-        logits = model(embeddings_).cpu().detach().numpy()
-
-    preds = np.argmax(logits, axis=1)
-    is_correct = np.zeros(len(logits))
-    is_correct[np.where(np.equal(preds, labels))[0]] = 1
-
-    return logits, is_correct
-
-def embedding_distance(model_filepath, cls_token_is_first, tokenizer_filepath, embedding_filepath, examples_dirpath, poison_examples_dirpath, trigger_texts, input_type='clean'):
+def get_all_embeddings(model_filepath, cls_token_is_first, tokenizer_filepath, embedding_filepath, examples_dirpath, use_amp):
     # load the classification model and move it to the GPU
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    model = torch.load(model_filepath, map_location=device)
+    model = torch.load(model_filepath, map_location=device).eval()
 
-    model.eval()
-
+    # load the specified embedding
+    embedding = torch.load(embedding_filepath, map_location=device).eval()
   
     tokenizer = torch.load(tokenizer_filepath)
     # set the padding token if its undefined
     if not hasattr(tokenizer, 'pad_token') or tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    # load the specified embedding
-    embedding = torch.load(embedding_filepath, map_location=device)
-
-    embedding.eval()
 
     # identify the max sequence length for the given embedding
     max_input_length = tokenizer.max_model_input_sizes[tokenizer.name_or_path]
 
-    use_amp = True  # attempt to use mixed precision to accelerate embedding conversion process
-
-    if input_type == 'clean' or trigger_texts is None:
-        clean_logits, clean_embeddings, clean_labels = get_sentiment_on_examples(examples_dirpath, tokenizer, embedding, model, max_input_length, cls_token_is_first, use_amp, device, None)
-        return clean_logits, clean_embeddings, clean_labels
-
-    else:
-        triggered_logits, triggered_embeddings, triggered_labels = get_sentiment_on_examples(poison_examples_dirpath, tokenizer, embedding, model, max_input_length, cls_token_is_first, use_amp, device, None)
-        trig_removed_logits, trig_removed_embeddings, trig_removed_labels = get_sentiment_on_examples(poison_examples_dirpath, tokenizer, embedding, model, max_input_length, cls_token_is_first, use_amp, device, trigger_texts)
-        return triggered_logits, triggered_embeddings, triggered_labels, trig_removed_logits, trig_removed_embeddings, trig_removed_labels
+    logits, embeddings, labels = get_sentiment_on_examples(examples_dirpath, tokenizer, embedding, model, max_input_length, cls_token_is_first, use_amp, device)
+    return logits, embeddings, labels
 
 
 def read_model(df, model_idx, main_path, models_path):
@@ -165,36 +144,15 @@ def read_model(df, model_idx, main_path, models_path):
     model_filepath = os.path.join(cur_path, 'model.pt')
     cls_token_is_first = df['cls_token_is_first'][model_idx]
     examples_dirpath = os.path.join(cur_path, 'clean_example_data')
-    config_file = os.path.join(cur_path, 'config.json')
-    poison_examples_dirpath = os.path.join(cur_path, 'poisoned_example_data')
-
     exist = os.path.exists(model_filepath)
 
-    if poisoned:
-        with open(config_file) as f:
-            config = json.load(f)
-
-        trigger_texts = [t['text'] for t in config['triggers']]
-        trigger_targets = [(t['source_class'], t['target_class']) for t in config['triggers']]
-    
-    else:
-        trigger_texts = None
-        trigger_targets = None
-    
-
-    return exist, arch, poisoned, model_filepath, cls_token_is_first, tokenizer_filepath, embedding_filepath, examples_dirpath, poison_examples_dirpath, trigger_texts, trigger_targets
+    return exist, arch, poisoned, model_filepath, cls_token_is_first, tokenizer_filepath, embedding_filepath, examples_dirpath
 
 
-def write_embeddings_on_file(df, main_path, models_path, round_suffix, input_type='clean'):
+def write_embeddings_on_file(df, main_path, models_path, round_suffix, use_amp):
 
-    if input_type == 'clean':
-        all_embeddings, all_clean_logits, all_clean_labels = [], [], []
-        filename = f'clean_embeddings_{round_suffix}.pickle'
-
-    else:
-        all_trig_embeddings, all_trig_logits, all_trig_labels, all_trig_r_embeddings, all_trig_r_logits, all_trig_r_labels = [], [], [], [], [], []
-        filename = f'triggered_embeddings_{round_suffix}.pickle'
-
+    all_embeddings, all_logits, all_labels = [], [], []
+    filename = os.path.join(f'data_{round_suffix}', 'embeddings.pickle')
     model_labels = []
 
     for idx, _ in enumerate(df['model_name']):
@@ -203,23 +161,11 @@ def write_embeddings_on_file(df, main_path, models_path, round_suffix, input_typ
         
         model_labels.append(int(params[2]))
 
-        if input_type == 'clean':
-            clean_logits, clean_embeddings, clean_labels = embedding_distance(*params[3:-1], input_type=input_type)
-            all_embeddings.append(clean_embeddings); all_clean_logits.append(clean_logits); all_clean_labels.append(clean_labels)
-
-        else:
-            triggered_logits, triggered_embeddings, triggered_labels, trig_removed_logits, trig_removed_embeddings, trig_removed_labels = embedding_distance(*params[3:], input_type=input_type)
-            all_trig_embeddings.append(triggered_embeddings); all_trig_logits.append(triggered_logits); all_trig_labels.append(triggered_labels) 
-            all_trig_r_embeddings.append(trig_removed_embeddings); all_trig_r_logits.append(trig_removed_logits); all_trig_r_labels.append(trig_removed_labels)
+        logits, embeddings, labels = get_all_embeddings(*params[3:], use_amp=use_amp)
+        all_embeddings.append(embeddings); all_logits.append(logits); all_labels.append(labels)
 
     data = {}
-    if input_type == 'clean':
-        data['embeddings'], data['logits'], data['instance_labels'] = all_embeddings, all_clean_logits, all_clean_labels
-
-    else:
-        data['trig_embeddings'], data['trig_logits'], data['trig_instance_labels'] = all_trig_embeddings, all_trig_logits, all_trig_labels
-        data['trig_rem_embeddings'], data['trig_rem_logits'], data['trig_rem_instance_labels'] = all_trig_r_embeddings, all_trig_r_logits, all_trig_r_labels
-
+    data['embeddings'], data['logits'], data['instance_labels'] = all_embeddings, all_logits, all_labels
     data['model_labels'] = model_labels
 
     with open(filename, 'wb') as handle:

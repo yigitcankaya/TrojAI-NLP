@@ -8,8 +8,7 @@ import torch
 
 import trojai.modelgen.architecture_factory
 
-ALL_ARCHITECTURE_KEYS = ['LstmLinear', 'GruLinear', 'Linear']
-
+ALL_ARCHITECTURE_KEYS = ['LstmLinear', 'GruLinear', 'FCLinear']
 
 class LinearModel(torch.nn.Module):
     def __init__(self, input_size: int, output_size: int, dropout: float):
@@ -33,11 +32,16 @@ class LinearModel(torch.nn.Module):
 
         return output
 
+    def get_hidden(self, data):
+        data = data[:, 0, :]
+        hidden = self.dropout(data)
+        return hidden
 
 class FCLinearModel(torch.nn.Module):
     def __init__(self, input_size: int, hidden_size: int, output_size: int, dropout: float, n_layers: int):
         super().__init__()
 
+        self.relu = torch.nn.ReLU()
         fc_layers = list()
         fc_layers.append(torch.nn.Linear(input_size, hidden_size))
         for i in range(n_layers-1):
@@ -51,7 +55,7 @@ class FCLinearModel(torch.nn.Module):
         data = data[:, 0, :]
         # input data is after the embedding
         for layer in self.fc_layers:
-            data = layer(data)
+            data = self.relu(layer(data))
         data = self.dropout(data)
 
         # hidden = [batch size, hid dim]
@@ -60,17 +64,16 @@ class FCLinearModel(torch.nn.Module):
 
         return output
 
-
     def get_hidden(self, data):
-        # however the linear model need the input to be [batch size, embedding length]
         data = data[:, 0, :]
-        # input data is after the embedding
         for layer in self.fc_layers:
-            data = layer(data)
-        
+            data = self.relu(layer(data))
+
         data = self.dropout(data)
+
         return data
-        
+            
+
 class GruLinearModel(torch.nn.Module):
     def __init__(self, input_size: int, hidden_size: int, output_size: int, dropout: float, bidirectional: bool, n_layers: int):
         super().__init__()
@@ -169,13 +172,10 @@ def arch_factory_kwargs_generator(train_dataset_desc, clean_test_dataset_desc, t
     return output_dict
 
 
-# https://github.com/bentrevett/pytorch-sentiment-analysis/blob/master/2%20-%20Upgraded%20Sentiment%20Analysis.ipynb
-
-# class EmbeddingLSTMFactory(trojai.modelgen.architecture_factory.ArchitectureFactory):
-#     def new_architecture(self, input_dim=25000, embedding_dim=100, hidden_dim=256, output_dim=1,
-#                          n_layers=2, bidirectional=True, dropout=0.5, pad_idx=-999):
-#         return trojai.modelgen.architectures.text_architectures.EmbeddingLSTM(input_dim, embedding_dim, hidden_dim, output_dim,
-#                                   n_layers, bidirectional, dropout, pad_idx)
+class FCLinearFactory(trojai.modelgen.architecture_factory.ArchitectureFactory):
+    def new_architecture(self, input_size: int, hidden_size: int, output_size: int, dropout: float, bidirectional: bool, n_layers: int):
+        model = FCLinearModel(input_size, hidden_size, output_size, dropout, n_layers)
+        return model
 
 
 class LinearFactory(trojai.modelgen.architecture_factory.ArchitectureFactory):
@@ -205,6 +205,8 @@ def get_factory(model_name: str):
         model = GruLinearFactory()
     elif model_name == 'Linear':
         model = LinearFactory()
+    elif model_name == 'FCLinear':
+        model = FCLinearFactory()
     else:
         raise RuntimeError('Invalid Model Architecture Name: {}'.format(model_name))
 
